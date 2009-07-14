@@ -34,15 +34,16 @@
 	 server_start/3,
 	 server_step/2]).
 
+-include("cyrsasl.hrl").
+
 -record(sasl_mechanism, {mechanism, module, require_plain_password}).
--record(sasl_state, {service, myname, realm,
-		     get_password, check_password, check_password_digest,
-		     mech_mod, mech_state}).
+-record(sasl_state, {service, myname,
+		     mech_mod, mech_state, params}).
 
 -export([behaviour_info/1]).
 
 behaviour_info(callbacks) ->
-    [{mech_new, 4}, {mech_step, 2}];
+    [{mech_new, 1}, {mech_step, 2}];
 behaviour_info(_Other) ->
     undefined.
 
@@ -114,23 +115,26 @@ listmech(Host) ->
 
 server_new(Service, ServerFQDN, UserRealm, _SecFlags,
 	   GetPassword, CheckPassword, CheckPasswordDigest) ->
+    Params = #sasl_params{
+      host = ServerFQDN,
+      realm = UserRealm,
+      get_password = GetPassword,
+      check_password = CheckPassword,
+      check_password_digest= CheckPasswordDigest
+     },
+
     #sasl_state{service = Service,
 		myname = ServerFQDN,
-		realm = UserRealm,
-		get_password = GetPassword,
-		check_password = CheckPassword,
-		check_password_digest= CheckPasswordDigest}.
+		params = Params}.
+
 
 server_start(State, Mech, ClientIn) ->
     case lists:member(Mech, listmech(State#sasl_state.myname)) of
 	true ->
 	    case ets:lookup(sasl_mechanism, Mech) of
 		[#sasl_mechanism{module = Module}] ->
-		    {ok, MechState} = Module:mech_new(
-					State#sasl_state.myname,
-					State#sasl_state.get_password,
-					State#sasl_state.check_password,
-					State#sasl_state.check_password_digest),
+		    {ok, MechState} =
+			Module:mech_new(State#sasl_state.params),
 		    server_step(State#sasl_state{mech_mod = Module,
 						 mech_state = MechState},
 				ClientIn);
