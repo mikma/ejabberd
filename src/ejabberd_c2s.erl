@@ -248,9 +248,16 @@ wait_for_stream({xmlstreamstart, _Name, Attrs}, StateData) ->
 			    send_text(StateData, Header),
 			    case StateData#state.authenticated of
 				false ->
+				    Realm =
+					case ejabberd_config:get_local_option({sasl_realm, Server}) of
+					    undefined ->
+						"";
+					    Realm0 ->
+						Realm0
+					end,
 				    SASLState =
 					cyrsasl:server_new(
-					  "jabber", Server, "", [],
+					  "jabber", Server, Realm, [],
 					  fun(U) ->
 						  ejabberd_auth:get_password_with_authmodule(
 						    U, Server)
