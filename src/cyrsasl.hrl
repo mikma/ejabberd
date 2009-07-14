@@ -3,4 +3,5 @@
 	  realm,
 	  get_password,
 	  check_password,
-	  check_password_digest}).
+	  check_password_digest,
+	  socket}).

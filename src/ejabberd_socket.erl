@@ -43,7 +43,11 @@
 	 get_peer_certificate/1,
 	 get_verify_result/1,
 	 close/1,
-	 sockname/1, peername/1]).
+	 sockname/1, peername/1,
+	 gethostname/1]).
+
+-include("ejabberd.hrl").
+-include_lib("kernel/include/inet.hrl").
 
 -record(socket_state, {sockmod, socket, receiver}).
 
@@ -182,6 +186,23 @@ peername(#socket_state{sockmod = SockMod, socket = Socket}) ->
 	    inet:peername(Socket);
 	_ ->
 	    SockMod:peername(Socket)
+    end.
+
+gethostname(#socket_state{socket = Socket} = State) ->
+    ?DEBUG("gethostname ~p~n", [Socket]),
+
+    case sockname(State) of
+	{ok, {Addr, _Port}} ->
+	    case inet:gethostbyaddr(Addr) of
+		{ok, HostEnt} when is_record(HostEnt, hostent) ->
+		    ?DEBUG("gethostname result ~p~n",
+			   [HostEnt#hostent.h_name]),
+		    {ok, HostEnt#hostent.h_name};
+		{error, Reason} = E ->
+		    E
+	    end;
+	{error, Reason} = E ->
+	    E
     end.
 
 %%====================================================================

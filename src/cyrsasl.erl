@@ -30,7 +30,7 @@
 -export([start/0,
 	 register_mechanism/3,
 	 listmech/1,
-	 server_new/7,
+	 server_new/8,
 	 server_start/3,
 	 server_step/2]).
 
@@ -114,13 +114,14 @@ listmech(Host) ->
     filter_anonymous(Host, Mechs).
 
 server_new(Service, ServerFQDN, UserRealm, _SecFlags,
-	   GetPassword, CheckPassword, CheckPasswordDigest) ->
+	   GetPassword, CheckPassword, CheckPasswordDigest, Socket) ->
     Params = #sasl_params{
       host = ServerFQDN,
       realm = UserRealm,
       get_password = GetPassword,
       check_password = CheckPassword,
-      check_password_digest= CheckPasswordDigest
+      check_password_digest= CheckPasswordDigest,
+      socket = Socket
      },
 
     #sasl_state{service = Service,

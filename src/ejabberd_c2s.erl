@@ -269,7 +269,8 @@ wait_for_stream({xmlstreamstart, _Name, Attrs}, StateData) ->
 					  fun(U, P, D, DG) ->
 						  ejabberd_auth:check_password_with_authmodule(
 						    U, Server, P, D, DG)
-					  end),
+					  end,
+					  StateData#state.socket),
 				    Mechs = lists:map(
 					      fun(S) ->
 						      {xmlelement, "mechanism", [],
