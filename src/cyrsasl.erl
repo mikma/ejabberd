@@ -51,6 +51,7 @@ start() ->
     ets:new(sasl_mechanism, [named_table,
 			     public,
 			     {keypos, #sasl_mechanism.mechanism}]),
+    cyrsasl_gssapi:start([]),
     cyrsasl_plain:start([]),
     cyrsasl_digest:start([]),
     cyrsasl_anonymous:start([]),
