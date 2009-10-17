@@ -353,10 +353,14 @@ do_route1(Host, ServerHost, Access, HistorySize, RoomShaper,
 			    case jlib:iq_query_info(Packet) of
 				#iq{type = get, xmlns = ?NS_DISCO_INFO = XMLNS,
  				    sub_el = _SubEl, lang = Lang} = IQ ->
+				    Info = ejabberd_hooks:run_fold(
+					     disco_info, ServerHost, [],
+					     [ServerHost, ?MODULE, "", ""]),
 				    Res = IQ#iq{type = result,
 						sub_el = [{xmlelement, "query",
 							   [{"xmlns", XMLNS}],
-							   iq_disco_info(Lang)}]},
+							   iq_disco_info(Lang)
+							   ++Info}]},
 				    ejabberd_router:route(To,
 							  From,
 							  jlib:iq_to_xml(Res));
@@ -464,8 +468,7 @@ do_route1(Host, ServerHost, Access, HistorySize, RoomShaper,
 							    AccessCreate, From,
 							    Room) of
 				true ->
-				    ?DEBUG("MUC: open new room '~s'~n", [Room]),
-				    {ok, Pid} = mod_muc_room:start(
+				    {ok, Pid} = start_new_room(
 						  Host, ServerHost, Access,
 						  Room, HistorySize,
 						  RoomShaper, From,
@@ -532,6 +535,23 @@ load_permanent_rooms(Host, ServerHost, Access, HistorySize, RoomShaper) ->
 			      ok
 		      end
 	      end, Rs)
+    end.
+
+start_new_room(Host, ServerHost, Access, Room,
+	       HistorySize, RoomShaper, From,
+	       Nick, DefRoomOpts) ->
+    case mnesia:dirty_read(muc_room, {Room, Host}) of
+	[] ->
+	    ?DEBUG("MUC: open new room '~s'~n", [Room]),
+	    mod_muc_room:start(Host, ServerHost, Access,
+			       Room, HistorySize,
+			       RoomShaper, From,
+			       Nick, DefRoomOpts);
+	[#muc_room{opts = Opts}|_] ->
+	    ?DEBUG("MUC: restore room '~s'~n", [Room]),
+	    mod_muc_room:start(Host, ServerHost, Access,
+			       Room, HistorySize,
+			       RoomShaper, Opts)
     end.
 
 register_room(Host, Room, Pid) ->
@@ -738,11 +758,11 @@ process_iq_register_set(Host, From, SubEl, Lang) ->
 				    {error, ?ERR_BAD_REQUEST};
 				_ ->
 				    case lists:keysearch("nick", 1, XData) of
-					false ->
+					{value, {_, [Nick]}} when Nick /= "" ->
+					    iq_set_register_info(Host, From, Nick, Lang);
+					_ ->
 					    ErrText = "You must fill in field \"Nickname\" in the form",
-					    {error, ?ERRT_NOT_ACCEPTABLE(Lang, ErrText)};
-					{value, {_, [Nick]}} ->
-					    iq_set_register_info(Host, From, Nick, Lang)
+					    {error, ?ERRT_NOT_ACCEPTABLE(Lang, ErrText)}
 				    end
 			    end;
 			_ ->

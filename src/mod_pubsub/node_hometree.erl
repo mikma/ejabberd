@@ -65,7 +65,8 @@
 	 get_entity_subscriptions/2,
 	 get_node_subscriptions/1,
 	 get_subscriptions/2,
-	 set_subscriptions/3,
+	 set_subscriptions/4,
+	 get_pending_nodes/2,
 	 get_states/1,
 	 get_state/2,
 	 set_state/1,
@@ -91,7 +92,7 @@
 %% plugin. It can be used for example by the developer to create the specific
 %% module database schema if it does not exists yet.</p>
 init(_Host, _ServerHost, _Opts) ->
-    ok = pubsub_subscription:init(),
+    pubsub_subscription:init(),
     mnesia:create_table(pubsub_state,
 			[{disc_copies, [node()]},
 			 {attributes, record_info(fields, pubsub_state)}]),
@@ -137,11 +138,12 @@ options() ->
      {notify_delete, false},
      {notify_retract, true},
      {persist_items, true},
-     {max_items, ?MAXITEMS div 2},
+     {max_items, ?MAXITEMS},
      {subscribe, true},
      {access_model, open},
      {roster_groups_allowed, []},
      {publish_model, publishers},
+     {notification_type, headline},
      {max_payload_size, ?MAX_PAYLOAD_SIZE},
      {send_last_published_item, on_sub_and_presence},
      {deliver_notifications, true},
@@ -155,6 +157,7 @@ features() ->
      "access-authorize",
      "delete-nodes",
      "delete-items",
+     "get-pending",
      "instant-nodes",
      "manage-subscriptions",
      "modify-affiliations",
@@ -241,7 +244,7 @@ delete_node(Removed) ->
 	end, Removed),
     {result, {default, broadcast, Reply}}.
 
-%% @spec (NodeId, Sender, Subscriber, AccessModel, SendLast, PresenceSubscription, RosterGroup) ->
+%% @spec (NodeId, Sender, Subscriber, AccessModel, SendLast, PresenceSubscription, RosterGroup, Options) ->
 %%		 {error, Reason} | {result, Result}
 %% @doc <p>Accepts or rejects subcription requests on a PubSub node.</p>
 %% <p>The mechanism works as follow:
@@ -309,8 +312,6 @@ subscribe_node(NodeId, Sender, Subscriber, AccessModel,
 	(AccessModel == whitelist) and (not Whitelisted) ->
 	    %% Node has whitelist access model and entity lacks required affiliation
 	    {error, ?ERR_EXTENDED(?ERR_NOT_ALLOWED, "closed-node")};
-	PendingSubscription ->
-	    {error, ?ERR_EXTENDED(?ERR_NOT_AUTHORIZED, "pending-subscription")};
 	%%MustPay ->
 	%%	% Payment is required for a subscription
 	%%	{error, ?ERR_PAYMENT_REQUIRED};
@@ -318,33 +319,32 @@ subscribe_node(NodeId, Sender, Subscriber, AccessModel,
 	%%	% Requesting entity is anonymous
 	%%	{error, ?ERR_FORBIDDEN};
 	true ->
-	    case pubsub_subscription:subscribe_node(Subscriber,
-						    NodeId, Options) of
-		{result, SubID} ->
+	    case pubsub_subscription:add_subscription(Subscriber, NodeId, Options) of
+		SubId when is_list(SubId) ->
 		    NewSub = case AccessModel of
 				 authorize -> pending;
-				 _	 -> subscribed
+				 _ -> subscribed
 			     end,
-		    set_state(SubState#pubsub_state{subscriptions = [{NewSub, SubID} | Subscriptions]}),
+		    set_state(SubState#pubsub_state{subscriptions = [{NewSub, SubId} | Subscriptions]}),
 		    case {NewSub, SendLast} of
 			{subscribed, never} ->
-			    {result, {default, subscribed, SubID}};
+			    {result, {default, subscribed, SubId}};
 			{subscribed, _} ->
-			    {result, {default, subscribed, SubID, send_last}};
+			    {result, {default, subscribed, SubId, send_last}};
 			{_, _} ->
-			    {result, {default, pending, SubID}}
+			    {result, {default, pending, SubId}}
 		    end;
 		_ ->
 		    {error, ?ERR_INTERNAL_SERVER_ERROR}
 	    end
     end.
 
-%% @spec (NodeId, Sender, Subscriber, SubID) ->
+%% @spec (NodeId, Sender, Subscriber, SubId) ->
 %%			{error, Reason} | {result, []}
 %%	 NodeId = mod_pubsub:pubsubNodeId()
 %%	 Sender = mod_pubsub:jid()
 %%	 Subscriber = mod_pubsub:jid()
-%%	 SubID = mod_pubsub:subid()
+%%	 SubId = mod_pubsub:subid()
 %%	 Reason = mod_pubsub:stanzaError()
 %% @doc <p>Unsubscribe the <tt>Subscriber</tt> from the <tt>Node</tt>.</p>
 unsubscribe_node(NodeId, Sender, Subscriber, SubId) ->
@@ -356,8 +356,8 @@ unsubscribe_node(NodeId, Sender, Subscriber, SubId) ->
 	GenKey -> GenState;
 	_ -> get_state(NodeId, SubKey)
 	end,
-    Subscriptions = lists:filter(fun({_Sub, _SubID}) -> true;
-				     (_SubID)	 -> false
+    Subscriptions = lists:filter(fun({_Sub, _SubId}) -> true;
+				     (_SubId)	 -> false
 				 end, SubState#pubsub_state.subscriptions),
     SubIdExists = case SubId of
 		      []		      -> false;
@@ -368,11 +368,11 @@ unsubscribe_node(NodeId, Sender, Subscriber, SubId) ->
 	%% Requesting entity is prohibited from unsubscribing entity
 	not Authorized ->
 	    {error, ?ERR_FORBIDDEN};
-	%% Entity did not specify SubID
-	%%SubID == "", ?? ->
+	%% Entity did not specify SubId
+	%%SubId == "", ?? ->
 	%%	{error, ?ERR_EXTENDED(?ERR_BAD_REQUEST, "subid-required")};
 	%% Invalid subscription identifier
-	%%InvalidSubID ->
+	%%InvalidSubId ->
 	%%	{error, ?ERR_EXTENDED(?ERR_NOT_ACCEPTABLE, "invalid-subid")};
 	%% Requesting entity is not a subscriber
 	Subscriptions == [] ->
@@ -403,11 +403,11 @@ unsubscribe_node(NodeId, Sender, Subscriber, SubId) ->
 	    {error, ?ERR_EXTENDED(?ERR_BAD_REQUEST, "subid-required")}
     end.
 
-delete_subscription(SubKey, NodeID, {Subscription, SubID}, SubState) ->
+delete_subscription(SubKey, NodeID, {Subscription, SubId}, SubState) ->
     Affiliation = SubState#pubsub_state.affiliation,
     AllSubs = SubState#pubsub_state.subscriptions,
-    NewSubs = AllSubs -- [{Subscription, SubID}],
-    pubsub_subscription:unsubscribe_node(SubKey, NodeID, SubID),
+    NewSubs = AllSubs -- [{Subscription, SubId}],
+    pubsub_subscription:delete_subscription(SubKey, NodeID, SubId),
     case {Affiliation, NewSubs} of
 	{none, []} ->
 	    % Just a regular subscriber, and this is final item, so
@@ -465,26 +465,29 @@ publish_item(NodeId, Publisher, PublishModel, MaxItems, ItemId, Payload) ->
 	_ -> get_state(NodeId, SubKey)
 	end,
     Affiliation = GenState#pubsub_state.affiliation,
-    Subscription = SubState#pubsub_state.subscriptions,
+    Subscribed = case PublishModel of
+	subscribers -> is_subscribed(SubState#pubsub_state.subscriptions);
+	_ -> undefined
+    end,
     if
 	not ((PublishModel == open)
 	     or ((PublishModel == publishers)
 		 and ((Affiliation == owner) or (Affiliation == publisher)))
-	     or ((PublishModel == subscribers)
-		 and (Subscription == subscribed))) ->
+	     or (Subscribed == true)) ->
 	    %% Entity does not have sufficient privileges to publish to node
 	    {error, ?ERR_FORBIDDEN};
 	true ->
 	    %% TODO: check creation, presence, roster
 	    if MaxItems > 0 ->
-		PubId = {now(), SubKey},
+		Now = now(),
+		PubId = {Now, SubKey},
 		Item = case get_item(NodeId, ItemId) of
 		       {result, OldItem} ->
 			   OldItem#pubsub_item{modification = PubId,
 					       payload = Payload};
 		       _ ->
 			   #pubsub_item{itemid = {ItemId, NodeId},
-					creation = {now(), GenKey},
+					creation = {Now, GenKey},
 					modification = PubId,
 					payload = Payload}
 		   end,
@@ -552,12 +555,30 @@ delete_item(NodeId, Publisher, PublishModel, ItemId) ->
 	    case lists:member(ItemId, Items) of
 		true ->
 		    del_item(NodeId, ItemId),
-		    NewItems = lists:delete(ItemId, Items),
-		    set_state(GenState#pubsub_state{items = NewItems}),
+		    set_state(GenState#pubsub_state{items = lists:delete(ItemId, Items)}),
 		    {result, {default, broadcast}};
 		false ->
-		    %% Non-existent node or item
-		    {error, ?ERR_ITEM_NOT_FOUND}
+		    case Affiliation of
+			owner ->
+			    %% Owner can delete other publishers items as well
+			    {result, States} = get_states(NodeId),
+			    lists:foldl(
+				fun(#pubsub_state{items = PI, affiliation = publisher} = S, Res) ->
+				    case lists:member(ItemId, PI) of
+					true ->
+					    del_item(NodeId, ItemId),
+					    set_state(S#pubsub_state{items = lists:delete(ItemId, PI)}),
+					    {result, {default, broadcast}};
+					false ->
+					    Res
+				    end;
+				   (_, Res) ->
+				    Res
+			    end, {error, ?ERR_ITEM_NOT_FOUND}, States);
+			_ ->
+			    %% Non-existent node or item
+			    {error, ?ERR_ITEM_NOT_FOUND}
+		    end
 	    end
     end.
 
@@ -571,9 +592,15 @@ purge_node(NodeId, Owner) ->
     GenKey = jlib:jid_remove_resource(SubKey),
     GenState = get_state(NodeId, GenKey),
     case GenState of
-	#pubsub_state{items = Items, affiliation = owner} ->
-	    del_items(NodeId, Items),
-	    set_state(GenState#pubsub_state{items = []}),
+	#pubsub_state{affiliation = owner} ->
+	    {result, States} = get_states(NodeId),
+	    lists:foreach(
+		fun(#pubsub_state{items = []}) ->
+		    ok;
+		   (#pubsub_state{items = Items} = S) ->
+		    del_items(NodeId, Items),
+		    set_state(S#pubsub_state{items = []})
+	    end, States),
 	    {result, {default, broadcast}};
 	_ ->
 	    %% Entity is not owner
@@ -594,7 +621,7 @@ get_entity_affiliations(Host, Owner) ->
     SubKey = jlib:jid_tolower(Owner),
     GenKey = jlib:jid_remove_resource(SubKey),
     States = mnesia:match_object(#pubsub_state{stateid = {GenKey, '_'}, _ = '_'}),
-    NodeTree = case ets:lookup(gen_mod:get_module_proc(Host, config), nodetree) of
+    NodeTree = case catch ets:lookup(gen_mod:get_module_proc(Host, config), nodetree) of
 	    [{nodetree, N}] -> N;
 	    _ -> nodetree_tree
 	end,
@@ -651,17 +678,15 @@ get_entity_subscriptions(Host, Owner) ->
 	    ++ mnesia:match_object(
 	       #pubsub_state{stateid = {SubKey, '_'}, _ = '_'})
     end,
-    NodeTree = case ets:lookup(gen_mod:get_module_proc(Host, config), nodetree) of
+    NodeTree = case catch ets:lookup(gen_mod:get_module_proc(Host, config), nodetree) of
 	    [{nodetree, N}] -> N;
 	    _ -> nodetree_tree
 	end,
     Reply = lists:foldl(fun(#pubsub_state{stateid = {J, N}, subscriptions = Ss}, Acc) ->
 	case NodeTree:get_node(N) of
 	    #pubsub_node{nodeid = {Host, _}} = Node ->
-			lists:foldl(fun({subscribed, SubID}, Acc2) ->
-					    [{Node, subscribed, SubID, J} | Acc2];
-					({pending, _SubID}, Acc2) ->
-					    [{Node, pending, J} | Acc2];
+			lists:foldl(fun({Sub, SubId}, Acc2) ->
+					    [{Node, Sub, SubId, J} | Acc2];
 					(S, Acc2) ->
 					    [{Node, S, J} | Acc2]
 				    end, Acc, Ss);
@@ -676,12 +701,15 @@ get_node_subscriptions(NodeId) ->
 		 %% TODO: get rid of cases to handle non-list subscriptions
 		 case Subscriptions of
 		    [_|_] ->
-			lists:map(fun({subscribed, SubID}) -> {J, subscribed, SubID};
-				     ({pending, _SubID}) -> {J, pending};
-				     (S) -> {J, S}
-				end, Subscriptions);
+			lists:foldl(fun({S, SubId}, Acc) ->
+					    [{J, S, SubId} | Acc];
+					(S, Acc) ->
+					    [{J, S} | Acc]
+				end, [], Subscriptions);
+		    [] ->
+			[];
 		    _ ->
-			 [{J, none}]
+			[{J, none}]
 		 end
 	 end,
     {result, lists:flatmap(Tr, States)}.
@@ -691,23 +719,102 @@ get_subscriptions(NodeId, Owner) ->
     SubState = get_state(NodeId, SubKey),
     {result, SubState#pubsub_state.subscriptions}.
 
-set_subscriptions(NodeId, Owner, Subscriptions) ->
+set_subscriptions(NodeId, Owner, Subscription, SubId) ->
     SubKey = jlib:jid_tolower(Owner),
     SubState = get_state(NodeId, SubKey),
-
-    OSIDs = [SID || {_, SID} <- SubState#pubsub_state.subscriptions],
-    NSIDs = [SID || {_, SID} <- Subscriptions],
-    RSIDs = OSIDs -- NSIDs,
-
-    lists:foreach(fun(SubID) ->
-			  pubsub_subscription:unsubscribe_node(SubKey, NodeId,
-							       SubID)
-		  end, RSIDs),
-    case {Subscriptions, SubState#pubsub_state.affiliation} of
-	{[], none} ->
-	    del_state(NodeId, SubKey);
+    case {SubId, SubState#pubsub_state.subscriptions} of
+	{_, []} ->
+	    case Subscription of
+		none -> {error, ?ERR_EXTENDED(?ERR_BAD_REQUEST, "not-subscribed")};
+		_ -> new_subscription(NodeId, Owner, Subscription, SubState)
+	    end;
+	{"", [{_, SID}]} ->
+	    case Subscription of
+		none -> unsub_with_subid(NodeId, SID, SubState);
+		_ -> replace_subscription({Subscription, SID}, SubState)
+	    end;
+	{"", [_|_]} ->
+	    {error, ?ERR_EXTENDED(?ERR_BAD_REQUEST, "subid-required")};
 	_ ->
-	    set_state(SubState#pubsub_state{subscriptions = Subscriptions})
+	    case Subscription of
+		none -> unsub_with_subid(NodeId, SubId, SubState);
+		_ -> replace_subscription({Subscription, SubId}, SubState)
+	    end
+    end.
+
+replace_subscription(NewSub, SubState) ->
+    NewSubs = replace_subscription(NewSub,
+				   SubState#pubsub_state.subscriptions, []),
+    set_state(SubState#pubsub_state{subscriptions = NewSubs}).
+
+replace_subscription(_, [], Acc) ->
+    Acc;
+replace_subscription({Sub, SubId}, [{_, SubID} | T], Acc) ->
+    replace_subscription({Sub, SubId}, T, [{Sub, SubID} | Acc]).
+
+new_subscription(NodeId, Owner, Subscription, SubState) ->
+    SubId = pubsub_subscription:add_subscription(Owner, NodeId, []),
+    Subscriptions = SubState#pubsub_state.subscriptions,
+    set_state(SubState#pubsub_state{subscriptions = [{Subscription, SubId} | Subscriptions]}),
+    {Subscription, SubId}.
+
+unsub_with_subid(NodeId, SubId, SubState) ->
+    pubsub_subscription:delete_subscription(SubState#pubsub_state.stateid,
+					 NodeId, SubId),
+    NewSubs = lists:filter(fun ({_, SID}) -> SubId =/= SID end,
+			   SubState#pubsub_state.subscriptions),
+    case {NewSubs, SubState#pubsub_state.affiliation} of
+	{[], none} ->
+	    del_state(NodeId, element(1, SubState#pubsub_state.stateid));
+	_ ->
+	    set_state(SubState#pubsub_state{subscriptions = NewSubs})
+    end.
+
+%% @spec (Host, Owner) -> {result, [Node]} | {error, Reason}
+%%       Host = host()
+%%       Owner = jid()
+%%       Node = pubsubNode()
+%% @doc <p>Returns a list of Owner's nodes on Host with pending
+%% subscriptions.</p>
+get_pending_nodes(Host, Owner) ->
+    GenKey = jlib:jid_remove_resource(jlib:jid_tolower(Owner)),
+    States = mnesia:match_object(#pubsub_state{stateid     = {GenKey, '_'},
+					       affiliation = owner,
+					       _           = '_'}),
+    NodeIDs = [ID || #pubsub_state{stateid = {_, ID}} <- States],
+    NodeTree = case catch ets:lookup(gen_mod:get_module_proc(Host, config), nodetree) of
+		    [{nodetree, N}] -> N;
+		    _               -> nodetree_tree
+	       end,
+    Reply = mnesia:foldl(fun(#pubsub_state{stateid = {_, NID}} = S, Acc) ->
+		case lists:member(NID, NodeIDs) of
+		    true ->
+			case get_nodes_helper(NodeTree, S) of
+			    {value, Node} -> [Node | Acc];
+			    false         -> Acc
+			end;
+		    false ->
+			Acc
+		end
+	    end, [], pubsub_state),
+    {result, Reply}.
+
+get_nodes_helper(NodeTree,
+		 #pubsub_state{stateid = {_, N}, subscriptions = Subs}) ->
+    HasPending = fun ({pending, _}) -> true;
+		     (pending)      -> true;
+		     (_)            -> false
+		 end,
+    case lists:any(HasPending, Subs) of
+	true ->
+	    case NodeTree:get_node(N) of
+		#pubsub_node{nodeid = {_, Node}} ->
+		    {value, Node};
+		_ ->
+		    false
+	    end;
+	false ->
+	    false
     end.
 
 %% @spec (NodeId) -> [States] | []
@@ -750,8 +857,9 @@ set_state(State) when is_record(State, pubsub_state) ->
 set_state(_) ->
     {error, ?ERR_INTERNAL_SERVER_ERROR}.
 
-%% @spec (StateId) -> ok | {error, Reason::stanzaError()}
-%%	 StateId = mod_pubsub:pubsubStateId()
+%% @spec (NodeId, JID) -> ok | {error, Reason::stanzaError()}
+%%	 NodeId = mod_pubsub:pubsubNodeId()
+%%	 JID = mod_pubsub:jid()
 %% @doc <p>Delete a state from database.</p>
 del_state(NodeId, JID) ->
     mnesia:delete({pubsub_state, {JID, NodeId}}).
@@ -781,10 +889,10 @@ get_items(NodeId, JID, AccessModel, PresenceSubscription, RosterGroup, _SubId) -
     Subscriptions = SubState#pubsub_state.subscriptions,
     Whitelisted = can_fetch_item(Affiliation, Subscriptions),
     if
-	%%SubID == "", ?? ->
+	%%SubId == "", ?? ->
 	    %% Entity has multiple subscriptions to the node but does not specify a subscription ID
 	    %{error, ?ERR_EXTENDED(?ERR_BAD_REQUEST, "subid-required")};
-	%%InvalidSubID ->
+	%%InvalidSubId ->
 	    %% Entity is subscribed but specifies an invalid subscription ID
 	    %{error, ?ERR_EXTENDED(?ERR_NOT_ACCEPTABLE, "invalid-subid")};
 	GenState#pubsub_state.affiliation == outcast ->
@@ -826,13 +934,13 @@ get_item(NodeId, ItemId, JID, AccessModel, PresenceSubscription, RosterGroup, _S
     GenKey = jlib:jid_remove_resource(SubKey),
     GenState = get_state(NodeId, GenKey),
     Affiliation = GenState#pubsub_state.affiliation,
-    Subscription = GenState#pubsub_state.subscriptions,
-    Whitelisted = can_fetch_item(Affiliation, Subscription),
+    Subscriptions = GenState#pubsub_state.subscriptions,
+    Whitelisted = can_fetch_item(Affiliation, Subscriptions),
     if
-	%%SubID == "", ?? ->
+	%%SubId == "", ?? ->
 	    %% Entity has multiple subscriptions to the node but does not specify a subscription ID
 	    %{error, ?ERR_EXTENDED(?ERR_BAD_REQUEST, "subid-required")};
-	%%InvalidSubID ->
+	%%InvalidSubId ->
 	    %% Entity is subscribed but specifies an invalid subscription ID
 	    %{error, ?ERR_EXTENDED(?ERR_NOT_ACCEPTABLE, "invalid-subid")};
 	GenState#pubsub_state.affiliation == outcast ->
@@ -847,7 +955,7 @@ get_item(NodeId, ItemId, JID, AccessModel, PresenceSubscription, RosterGroup, _S
 	(AccessModel == whitelist) and (not Whitelisted) ->
 	    %% Node has whitelist access model and entity lacks required affiliation
 	    {error, ?ERR_EXTENDED(?ERR_NOT_ALLOWED, "closed-node")};
-	(AccessModel == authorize) -> % TODO: to be done
+	(AccessModel == authorize) and (not Whitelisted) ->
 	    %% Node has authorize access model
 	    {error, ?ERR_FORBIDDEN};
 	%%MustPay ->
@@ -890,11 +998,13 @@ can_fetch_item(owner,        _)             -> true;
 can_fetch_item(member,       _)             -> true;
 can_fetch_item(publisher,    _)             -> true;
 can_fetch_item(outcast,      _)             -> false;
-can_fetch_item(none, Subscriptions) ->
-    lists:any(fun ({subscribed, _SubID}) -> true;
-                  (_)                    -> false
-              end, Subscriptions);
+can_fetch_item(none, Subscriptions) -> is_subscribed(Subscriptions);
 can_fetch_item(_Affiliation, _Subscription) -> false.
+
+is_subscribed(Subscriptions) ->
+    lists:any(fun ({subscribed, _SubId}) -> true;
+                  (_)                    -> false
+              end, Subscriptions).
 
 %% Returns the first item where Pred() is true in List
 first_in_list(_Pred, []) ->

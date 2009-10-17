@@ -331,9 +331,9 @@ process_term(Term, State) ->
 	    Listeners2 =
 		lists:map(
 		  fun({PortIP, Module, Opts}) ->
-			  {Port, IPT, _, _, OptsClean} =
+			  {Port, IPT, _, _, Proto, OptsClean} =
 			      ejabberd_listener:parse_listener_portip(PortIP, Opts),
-			  {{Port, IPT}, Module, OptsClean}
+			  {{Port, IPT, Proto}, Module, OptsClean}
 		  end,
 		  Listeners),
 	    add_option(listen, Listeners2, State);
@@ -343,6 +343,8 @@ process_term(Term, State) ->
 	    add_option(outgoing_s2s_port, Port, State);
 	{outgoing_s2s_options, Methods, Timeout} ->
 	    add_option(outgoing_s2s_options, {Methods, Timeout}, State);
+        {s2s_dns_options, PropList} ->
+            add_option(s2s_dns_options, PropList, State);
 	{s2s_use_starttls, Port} ->
 	    add_option(s2s_use_starttls, Port, State);
 	{s2s_certfile, CertFile} ->
@@ -384,6 +386,8 @@ process_term(Term, State) ->
 	{loglevel, Loglevel} ->
 	    ejabberd_loglevel:set(Loglevel),
 	    State;
+	{max_fsm_queue, N} ->
+	    add_option(max_fsm_queue, N, State);
 	{_Opt, _Val} ->
 	    lists:foldl(fun(Host, S) -> process_host_term(Term, Host, S) end,
 			State, State#state.hosts)

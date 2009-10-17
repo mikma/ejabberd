@@ -103,6 +103,7 @@ AC_CONFIG_FILES([Makefile
                  $make_pam
                  $make_web
                  stringprep/Makefile
+                 stun/Makefile
                  $make_tls
                  $make_odbc
                  $make_ejabberd_zlib])
@@ -137,5 +138,32 @@ if test "$ENABLEUSER" != ""; then
   echo "allow this system user to start ejabberd: $ENABLEUSER"
   AC_SUBST([INSTALLUSER], [$ENABLEUSER])
 fi
+
+AC_CANONICAL_SYSTEM
+#AC_DEFINE_UNQUOTED(CPU_VENDOR_OS, "$target")
+#AC_SUBST(target_os)
+
+
+case "$target_os" in
+    *darwin10*)
+	echo "Target OS is 'Darwin10'"
+	AC_LANG(Erlang)
+	AC_RUN_IFELSE(
+	    [AC_LANG_PROGRAM([],[dnl
+	     halt(case erlang:system_info(wordsize) of
+	     8 -> 0; 4 -> 1 end)])],
+	    [AC_MSG_NOTICE(found 64-bit Erlang)
+	     CBIT=-m64],
+	    [AC_MSG_NOTICE(found 32-bit Erlang)
+	     CBIT=-m32])
+	;;
+    *)        
+	echo "Target OS is '$target_os'"
+	CBIT=""
+	;;
+esac
+CFLAGS="$CFLAGS $CBIT"
+LD_SHARED="$LD_SHARED $CBIT"
+echo "CBIT is set to '$CBIT'"
 
 AC_OUTPUT

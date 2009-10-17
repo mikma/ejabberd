@@ -54,7 +54,8 @@
 	 get_entity_subscriptions/2,
 	 get_node_subscriptions/1,
 	 get_subscriptions/2,
-	 set_subscriptions/3,
+	 set_subscriptions/4,
+	 get_pending_nodes/2,
 	 get_states/1,
 	 get_state/2,
 	 set_state/1,
@@ -81,11 +82,12 @@ options() ->
      {notify_delete, false},
      {notify_retract, false},
      {persist_items, false},
-     {max_items, ?MAXITEMS div 2},
+     {max_items, ?MAXITEMS},
      {subscribe, true},
      {access_model, presence},
      {roster_groups_allowed, []},
      {publish_model, publishers},
+     {notification_type, headline},
      {max_payload_size, ?MAX_PAYLOAD_SIZE},
      {send_last_published_item, on_sub_and_presence},
      {deliver_notifications, true},
@@ -171,7 +173,7 @@ get_entity_affiliations(_Host, Owner) ->
     SubKey = jlib:jid_tolower(Owner),
     GenKey = jlib:jid_remove_resource(SubKey),
     States = mnesia:match_object(#pubsub_state{stateid = {GenKey, '_'}, _ = '_'}),
-    NodeTree = case ets:lookup(gen_mod:get_module_proc(D, config), nodetree) of
+    NodeTree = case catch ets:lookup(gen_mod:get_module_proc(D, config), nodetree) of
 	    [{nodetree, N}] -> N;
 	    _ -> nodetree_tree
 	end,
@@ -203,7 +205,7 @@ get_entity_subscriptions(_Host, Owner) ->
 	    ++ mnesia:match_object(
 	       #pubsub_state{stateid = {SubKey, '_'}, _ = '_'})
     end,
-    NodeTree = case ets:lookup(gen_mod:get_module_proc(D, config), nodetree) of
+    NodeTree = case catch ets:lookup(gen_mod:get_module_proc(D, config), nodetree) of
 	    [{nodetree, N}] -> N;
 	    _ -> nodetree_tree
 	end,
@@ -233,8 +235,11 @@ get_node_subscriptions(NodeId) ->
 get_subscriptions(NodeId, Owner) ->
     node_hometree:get_subscriptions(NodeId, Owner).
 
-set_subscriptions(NodeId, Owner, Subscription) ->
-    node_hometree:set_subscriptions(NodeId, Owner, Subscription).
+set_subscriptions(NodeId, Owner, Subscription, SubId) ->
+    node_hometree:set_subscriptions(NodeId, Owner, Subscription, SubId).
+
+get_pending_nodes(Host, Owner) ->
+    node_hometree:get_pending_nodes(Host, Owner).
 
 get_states(NodeId) ->
     node_hometree:get_states(NodeId).

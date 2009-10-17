@@ -32,7 +32,11 @@
 	 get_options_xform/2,
 	 parse_options_xform/1]).
 
--include_lib("stdlib/include/qlc.hrl").
+% Internal function also exported for use in transactional bloc from pubsub plugins
+-export([add_subscription/3,
+	 delete_subscription/3,
+	 read_subscription/3,
+	 write_subscription/4]).
 
 -include("pubsub.hrl").
 -include("jlib.hrl").
@@ -86,31 +90,35 @@ init() ->
     ok = create_table().
 
 subscribe_node(JID, NodeID, Options) ->
-    case mnesia:transaction(fun add_subscription/3,
+    case catch mnesia:sync_dirty(fun add_subscription/3,
 			    [JID, NodeID, Options]) of
-	{atomic, Result} -> {result, Result};
-	{aborted, Error} -> Error
+	{'EXIT', {aborted, Error}} -> Error;
+	{error, Error} -> {error, Error};
+	Result -> {result, Result}
     end.
 
 unsubscribe_node(JID, NodeID, SubID) ->
-    case mnesia:transaction(fun delete_subscription/3,
+    case catch mnesia:sync_dirty(fun delete_subscription/3,
 			    [JID, NodeID, SubID]) of
-	{atomic, Result} -> {result, Result};
-	{aborted, Error} -> Error
+	{'EXIT', {aborted, Error}} -> Error;
+	{error, Error} -> {error, Error};
+	Result -> {result, Result}
     end.
 
 get_subscription(JID, NodeID, SubID) ->
-    case mnesia:transaction(fun read_subscription/3,
+    case catch mnesia:sync_dirty(fun read_subscription/3,
 			    [JID, NodeID, SubID]) of
-	{atomic, Result} -> {result, Result};
-	{aborted, Error} -> Error
+	{'EXIT', {aborted, Error}} -> Error;
+	{error, Error} -> {error, Error};
+	Result -> {result, Result}
     end.
 
 set_subscription(JID, NodeID, SubID, Options) ->
-    case mnesia:transaction(fun write_subscription/4,
+    case catch mnesia:sync_dirty(fun write_subscription/4,
 			    [JID, NodeID, SubID, Options]) of
-	{atomic, Result} -> {result, Result};
-	{aborted, Error} -> Error
+	{'EXIT', {aborted, Error}} -> Error;
+	{error, Error} -> {error, Error};
+	Result -> {result, Result}
     end.
 
 get_options_xform(Lang, Options) ->
@@ -154,26 +162,23 @@ create_table() ->
 
 add_subscription(_JID, _NodeID, Options) ->
     SubID = make_subid(),
-    Record = #pubsub_subscription{subid = SubID, options = Options},
-    mnesia:write(Record),
+    mnesia:write(#pubsub_subscription{subid = SubID, options = Options}),
     SubID.
 
-delete_subscription(JID, NodeID, SubID) ->
-    Sub = read_subscription(JID, NodeID, SubID),
-    mnesia:delete({pubsub_subscription, SubID}),
-    Sub.
+delete_subscription(_JID, _NodeID, SubID) ->
+    mnesia:delete({pubsub_subscription, SubID}).
 
 read_subscription(_JID, _NodeID, SubID) ->
-    Q = qlc:q([Sub || Sub <- mnesia:table(pubsub_subscription),
-		      Sub#pubsub_subscription.subid == SubID]),
-    case qlc:e(Q) of
-	[Sub] -> Sub;
-	[]    -> mnesia:abort({error, notfound})
+    case mnesia:read({pubsub_subscription, SubID}) of
+    [Sub] -> Sub;
+    _ -> {error, notfound}
     end.
 
 write_subscription(JID, NodeID, SubID, Options) ->
-    Sub = read_subscription(JID, NodeID, SubID),
-    mnesia:write(Sub#pubsub_subscription{options = Options}).
+    case read_subscription(JID, NodeID, SubID) of
+    {error, notfound} -> {error, notfound};
+    Sub -> mnesia:write(Sub#pubsub_subscription{options = Options})
+    end.
 
 make_subid() ->
     {T1, T2, T3} = now(),

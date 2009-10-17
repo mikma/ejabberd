@@ -30,7 +30,7 @@
 -behaviour(gen_fsm).
 
 %% External exports
--export([start_link/5, start/6, route_chan/4, route_nick/3]).
+-export([start_link/7, start/8, route_chan/4, route_nick/3]).
 
 %% gen_fsm callbacks
 -export([init/1,
@@ -48,8 +48,8 @@
 
 -define(SETS, gb_sets).
 
--record(state, {socket, encoding, queue,
-		user, host, server, nick,
+-record(state, {socket, encoding, port, password,
+		queue, user, host, server, nick,
 		channels = dict:new(),
 		nickchannel,
 		inbuf = "", outbuf = ""}).
@@ -65,13 +65,13 @@
 %%%----------------------------------------------------------------------
 %%% API
 %%%----------------------------------------------------------------------
-start(From, Host, ServerHost, Server, Username, Encoding) ->
+start(From, Host, ServerHost, Server, Username, Encoding, Port, Password) ->
     Supervisor = gen_mod:get_module_proc(ServerHost, ejabberd_mod_irc_sup),
     supervisor:start_child(
-      Supervisor, [From, Host, Server, Username, Encoding]).
+      Supervisor, [From, Host, Server, Username, Encoding, Port, Password]).
 
-start_link(From, Host, Server, Username, Encoding) ->
-    gen_fsm:start_link(?MODULE, [From, Host, Server, Username, Encoding],
+start_link(From, Host, Server, Username, Encoding, Port, Password) ->
+    gen_fsm:start_link(?MODULE, [From, Host, Server, Username, Encoding, Port, Password],
 		       ?FSMOPTS).
 
 %%%----------------------------------------------------------------------
@@ -83,12 +83,14 @@ start_link(From, Host, Server, Username, Encoding) ->
 %% Returns: {ok, StateName, StateData}          |
 %%          {ok, StateName, StateData, Timeout} |
 %%          ignore                              |
-%%          {stop, StopReason}                   
+%%          {stop, StopReason}
 %%----------------------------------------------------------------------
-init([From, Host, Server, Username, Encoding]) ->
+init([From, Host, Server, Username, Encoding, Port, Password]) ->
     gen_fsm:send_event(self(), init),
     {ok, open_socket, #state{queue = queue:new(),
 			     encoding = Encoding,
+			     port = Port,
+			     password = Password,
 			     user = From,
 			     nick = Username,
 			     host = Host,
@@ -98,15 +100,21 @@ init([From, Host, Server, Username, Encoding]) ->
 %% Func: StateName/2
 %% Returns: {next_state, NextStateName, NextStateData}          |
 %%          {next_state, NextStateName, NextStateData, Timeout} |
-%%          {stop, Reason, NewStateData}                         
+%%          {stop, Reason, NewStateData}
 %%----------------------------------------------------------------------
 open_socket(init, StateData) ->
     Addr = StateData#state.server,
-    Port = 6667,
+    Port = StateData#state.port,
     ?DEBUG("connecting to ~s:~p~n", [Addr, Port]),
     case gen_tcp:connect(Addr, Port, [binary, {packet, 0}]) of
 	{ok, Socket} ->
 	    NewStateData = StateData#state{socket = Socket},
+	    if
+		StateData#state.password /= "" ->
+		    send_text(NewStateData,
+			      io_lib:format("PASS ~s\r\n", [StateData#state.password]));
+		true -> true
+	    end,
 	    send_text(NewStateData,
 		      io_lib:format("NICK ~s\r\n", [StateData#state.nick])),
 	    send_text(NewStateData,
@@ -151,7 +159,7 @@ stream_established(closed, StateData) ->
 %%          {reply, Reply, NextStateName, NextStateData}          |
 %%          {reply, Reply, NextStateName, NextStateData, Timeout} |
 %%          {stop, Reason, NewStateData}                          |
-%%          {stop, Reason, Reply, NewStateData}                    
+%%          {stop, Reason, Reply, NewStateData}
 %%----------------------------------------------------------------------
 %state_name(Event, From, StateData) ->
 %    Reply = ok,
@@ -161,7 +169,7 @@ stream_established(closed, StateData) ->
 %% Func: handle_event/3
 %% Returns: {next_state, NextStateName, NextStateData}          |
 %%          {next_state, NextStateName, NextStateData, Timeout} |
-%%          {stop, Reason, NewStateData}                         
+%%          {stop, Reason, NewStateData}
 %%----------------------------------------------------------------------
 handle_event(_Event, StateName, StateData) ->
     {next_state, StateName, StateData}.
@@ -173,7 +181,7 @@ handle_event(_Event, StateName, StateData) ->
 %%          {reply, Reply, NextStateName, NextStateData}          |
 %%          {reply, Reply, NextStateName, NextStateData, Timeout} |
 %%          {stop, Reason, NewStateData}                          |
-%%          {stop, Reason, Reply, NewStateData}                    
+%%          {stop, Reason, Reply, NewStateData}
 %%----------------------------------------------------------------------
 handle_sync_event(_Event, _From, StateName, StateData) ->
     Reply = ok,
@@ -195,7 +203,7 @@ code_change(_OldVsn, StateName, StateData, _Extra) ->
 %% Func: handle_info/3
 %% Returns: {next_state, NextStateName, NextStateData}          |
 %%          {next_state, NextStateName, NextStateData, Timeout} |
-%%          {stop, Reason, NewStateData}                         
+%%          {stop, Reason, NewStateData}
 %%----------------------------------------------------------------------
 handle_info({route_chan, Channel, Resource,
 	     {xmlelement, "presence", Attrs, _Els}},
@@ -241,11 +249,9 @@ handle_info({route_chan, Channel, Resource,
 	NewStateData == stop ->
 	    {stop, normal, StateData};
 	true ->
-	    case length(dict:fetch_keys(NewStateData#state.channels)) of
-		0 ->
-		    {stop, normal, NewStateData};
-		_ ->
-		    {next_state, StateName, NewStateData}
+	    case dict:fetch_keys(NewStateData#state.channels) of
+		[] -> {stop, normal, NewStateData};
+		_ -> {next_state, StateName, NewStateData}
 	    end
     end;
 
@@ -779,7 +785,7 @@ process_channel_topic_who(StateData, Chan, String) ->
     Msg1 = case Words of
 	       [_, "333", _, _Chan, Whoset , Timeset] ->
 		   case string:to_integer(Timeset) of
-		       {Unixtimeset, _Rest} -> 
+		       {Unixtimeset, _Rest} ->
 			   "Topic for #" ++ Chan ++ " set by " ++ Whoset ++
 			       " at " ++ unixtime2string(Unixtimeset);
 		       _->
@@ -999,7 +1005,7 @@ process_topic(StateData, Chan, From, String) ->
 
 process_part(StateData, Chan, From, String) ->
     [FromUser | FromIdent] = string:tokens(From, "!"),
-    {ok, Msg, _} = regexp:sub(String, ".*PART[^:]*:", ""),    
+    {ok, Msg, _} = regexp:sub(String, ".*PART[^:]*:", ""),
     Msg1 = filter_message(Msg),
     ejabberd_router:route(
       jlib:make_jid(lists:concat([Chan, "%", StateData#state.server]),
@@ -1027,7 +1033,7 @@ process_part(StateData, Chan, From, String) ->
 
 process_quit(StateData, From, String) ->
     [FromUser | FromIdent] = string:tokens(From, "!"),
-    
+
     {ok, Msg, _} = regexp:sub(String, ".*QUIT[^:]*:", ""),
     Msg1 = filter_message(Msg),
     %%NewChans =
@@ -1293,7 +1299,7 @@ unixtime2string(Unixtime) ->
     Secs = Unixtime + calendar:datetime_to_gregorian_seconds(
 			{{1970, 1, 1}, {0,0,0}}),
     case calendar:universal_time_to_local_time(
-	   calendar:gregorian_seconds_to_datetime(Secs)) of 
+	   calendar:gregorian_seconds_to_datetime(Secs)) of
 	{{Year, Month, Day}, {Hour, Minute, Second}} ->
 	    lists:flatten(
 	      io_lib:format("~4..0w-~2..0w-~2..0w ~2..0w:~2..0w:~2..0w",
@@ -1311,4 +1317,3 @@ toupper([C | Cs]) ->
     end;
 toupper([]) ->
     [].
-

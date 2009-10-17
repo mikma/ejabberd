@@ -103,11 +103,12 @@ set_node(Record) when is_record(Record, pubsub_node) ->
 set_node(_) ->
     {error, ?ERR_INTERNAL_SERVER_ERROR}.
 
+get_node(Host, Node, _From) ->
+    get_node(Host, Node).
+
 %% @spec (Host, Node) -> pubsubNode() | {error, Reason}
 %%     Host = mod_pubsub:host()
 %%     Node = mod_pubsub:pubsubNode()
-get_node(Host, Node, _From) ->
-    get_node(Host, Node).
 get_node(Host, Node) ->
     case catch mnesia:read({pubsub_node, {Host, Node}}) of
 	[Record] when is_record(Record, pubsub_node) -> Record;
@@ -121,10 +122,11 @@ get_node(NodeId) ->
 	Error -> Error
     end.
 
-%% @spec (Host) -> [pubsubNode()] | {error, Reason}
-%%     Host = mod_pubsub:host() | mod_pubsub:jid()
 get_nodes(Host, _From) ->
     get_nodes(Host).
+
+%% @spec (Host) -> [pubsubNode()] | {error, Reason}
+%%     Host = mod_pubsub:host() | mod_pubsub:jid()
 get_nodes(Host) ->
     mnesia:match_object(#pubsub_node{nodeid = {Host, '_'}, _ = '_'}).
 
@@ -148,10 +150,8 @@ get_parentnodes(_Host, _Node, _From) ->
 %% containing just this node.</p>
 get_parentnodes_tree(Host, Node, From) ->
     case get_node(Host, Node, From) of
-	N when is_record(N, pubsub_node) ->
-	    [{0, mnesia:read(pubsub_node, {Host, Node})}];
-	Error ->
-	    Error
+	N when is_record(N, pubsub_node) -> [{0, [N]}];
+	_Error -> []
     end.
 
 %% @spec (Host, Node, From) -> [pubsubNode()] | {error, Reason}
@@ -161,24 +161,31 @@ get_parentnodes_tree(Host, Node, From) ->
 get_subnodes(Host, Node, _From) ->
     get_subnodes(Host, Node).
 get_subnodes(Host, Node) ->
+%    mnesia:foldl(fun(#pubsub_node{nodeid = {H, _}, parents = Parents} = N, Acc) ->
+%			case lists:member(Node, Parents) and (Host == H) of
+%			    true -> [N | Acc];
+%			    false -> Acc
+%			end
+%		 end, [], pubsub_node).
     Q = qlc:q([N || #pubsub_node{nodeid = {NHost, _},
 				 parents = Parents} = N <- mnesia:table(pubsub_node),
 		       Host == NHost,
 		       lists:member(Node, Parents)]),
     qlc:e(Q).
 
+get_subnodes_tree(Host, Node, _From) ->
+    get_subnodes_tree(Host, Node).
+
 %% @spec (Host, Index) -> [pubsubNodeIdx()] | {error, Reason}
 %%     Host = mod_pubsub:host()
 %%     Node = mod_pubsub:pubsubNode()
 %%     From = mod_pubsub:jid()
-get_subnodes_tree(Host, Node, _From) ->
-    get_subnodes_tree(Host, Node).
 get_subnodes_tree(Host, Node) ->
     mnesia:foldl(fun(#pubsub_node{nodeid = {H, N}} = R, Acc) ->
-			 case lists:prefix(Node, N) and (H == Host) of
-			     true -> [R | Acc];
-			     _ -> Acc
-			 end
+			case lists:prefix(Node, N) and (H == Host) of
+			    true -> [R | Acc];
+			    false -> Acc
+			end
 		 end, [], pubsub_node).
 
 %% @spec (Host, Node, Type, Owner, Options) -> ok | {error, Reason}
@@ -189,7 +196,7 @@ get_subnodes_tree(Host, Node) ->
 %%     Options = list()
 create_node(Host, Node, Type, Owner, Options) ->
     BJID = jlib:jid_tolower(jlib:jid_remove_resource(Owner)),
-    case mnesia:read({pubsub_node, {Host, Node}}) of
+    case catch mnesia:read({pubsub_node, {Host, Node}}) of
 	[] ->
 	    {ParentNode, ParentExists} =
 		case Host of
@@ -198,14 +205,14 @@ create_node(Host, Node, Type, Owner, Options) ->
 			%% PEP does not uses hierarchy
 			{[], true};
 		    _ ->
-			Parent = lists:sublist(Node, length(Node) - 1),
-			case Parent of
+			case lists:sublist(Node, length(Node) - 1) of
 			[] -> 
 			    {[], true};
-			_ ->
-			    case mnesia:read({pubsub_node, {Host, Parent}}) of
-				[] -> {Parent, false};
-				_ -> {Parent, true}
+			Parent ->
+			    case catch mnesia:read({pubsub_node, {Host, Parent}}) of
+				[#pubsub_node{owners = [{[], Host, []}]}] -> {Parent, true};
+				[#pubsub_node{owners = Owners}] -> {Parent, lists:member(BJID, Owners)};
+				_ -> {Parent, false}
 			    end
 			end
 		end,

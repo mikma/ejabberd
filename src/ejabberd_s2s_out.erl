@@ -84,15 +84,12 @@
 %% Module start with or without supervisor:
 -ifdef(NO_TRANSIENT_SUPERVISORS).
 -define(SUPERVISOR_START, p1_fsm:start(ejabberd_s2s_out, [From, Host, Type],
-				       ?FSMLIMITS ++ ?FSMOPTS)).
+				       fsm_limit_opts() ++ ?FSMOPTS)).
 -else.
 -define(SUPERVISOR_START, supervisor:start_child(ejabberd_s2s_out_sup,
 						 [From, Host, Type])).
 -endif.
 
-%% Only change this value if you now what your are doing:
--define(FSMLIMITS,[]).
-%% -define(FSMLIMITS, [{max_queue, 2000}]).
 -define(FSMTIMEOUT, 30000).
 
 %% We do not block on send anymore.
@@ -132,7 +129,7 @@ start(From, Host, Type) ->
 
 start_link(From, Host, Type) ->
     p1_fsm:start_link(ejabberd_s2s_out, [From, Host, Type],
-		      ?FSMLIMITS ++ ?FSMOPTS).
+		      fsm_limit_opts() ++ ?FSMOPTS).
 
 start_connection(Pid) ->
     p1_fsm:send_event(Pid, init).
@@ -296,10 +293,11 @@ wait_for_stream({xmlstreamstart, _Name, Attrs}, StateData) ->
 	    {next_state, wait_for_features, StateData, ?FSMTIMEOUT};
 	{"jabber:server", "", true} when StateData#state.use_v10 ->
 	    {next_state, wait_for_features, StateData#state{db_enabled = false}, ?FSMTIMEOUT};
-	_ ->
+	{NSProvided, _, _} ->
 	    send_text(StateData, ?INVALID_NAMESPACE_ERR),
-	    ?INFO_MSG("Closing s2s connection: ~s -> ~s (invalid namespace)",
-		      [StateData#state.myname, StateData#state.server]),
+	    ?INFO_MSG("Closing s2s connection: ~s -> ~s (invalid namespace).~n"
+		      "Namespace provided: ~p~nNamespace expected: \"jabber:server\"",
+		      [StateData#state.myname, StateData#state.server, NSProvided]),
 	    {stop, normal, StateData}
     end;
 
@@ -995,11 +993,7 @@ is_verify_res(_) ->
 -include_lib("kernel/include/inet.hrl").
 
 get_addr_port(Server) ->
-    Res = case inet_res:getbyname("_xmpp-server._tcp." ++ Server, srv) of
-	      {error, _Reason1} ->
-		  inet_res:getbyname("_jabber._tcp." ++ Server, srv);
-	      {ok, _HEnt} = R -> R
-	  end,
+    Res = srv_lookup(Server),
     case Res of
 	{error, Reason} ->
 	    ?DEBUG("srv lookup of '~s' failed: ~p~n", [Server, Reason]),
@@ -1034,6 +1028,36 @@ get_addr_port(Server) ->
 			    List
 		    end
 	    end
+    end.
+
+srv_lookup(Server) ->
+    Options = case ejabberd_config:get_local_option(s2s_dns_options) of
+                  L when is_list(L) -> L;
+                  _ -> []
+              end,
+    TimeoutMs = timer:seconds(proplists:get_value(timeout, Options, 10)),
+    Retries = proplists:get_value(retries, Options, 2),
+    srv_lookup(Server, TimeoutMs, Retries).
+
+%% XXX - this behaviour is suboptimal in the case that the domain
+%% has a "_xmpp-server._tcp." but not a "_jabber._tcp." record and
+%% we don't get a DNS reply for the "_xmpp-server._tcp." lookup. In this
+%% case we'll give up when we get the "_jabber._tcp." nxdomain reply.
+srv_lookup(_Server, _Timeout, Retries) when Retries < 1 ->
+    {error, timeout};
+srv_lookup(Server, Timeout, Retries) ->
+    case inet_res:getbyname("_xmpp-server._tcp." ++ Server, srv, Timeout) of
+        {error, _Reason} ->
+            case inet_res:getbyname("_jabber._tcp." ++ Server, srv, Timeout) of
+                {error, timeout} ->
+                    ?ERROR_MSG("The DNS servers~n  ~p~ntimed out on request"
+			       " for ~p IN SRV."
+			       " You should check your DNS configuration.",
+                               [inet_db:res_option(nameserver), Server]),
+                    srv_lookup(Server, Timeout, Retries - 1);
+                R -> R
+            end;
+        {ok, _HEnt} = R -> R
     end.
 
 test_get_addr_port(Server) ->
@@ -1168,3 +1192,11 @@ terminate_if_waiting_delay(From, To) ->
 	      Pid ! terminate_if_waiting_before_retry
       end,
       Pids).
+
+fsm_limit_opts() ->
+    case ejabberd_config:get_local_option(max_fsm_queue) of
+	N when is_integer(N) ->
+	    [{max_queue, N}];
+	_ ->
+	    []
+    end.
